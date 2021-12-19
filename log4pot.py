@@ -15,6 +15,8 @@ from uuid import uuid4
 from expression_parser import parse
 from payloader import process_payloads
 
+from s3 import S3Log
+
 try:
     from azure.storage.blob import BlobServiceClient
 
@@ -28,13 +30,13 @@ except ImportError:
 
 re_exploit = re.compile("\${.*}")
 
-
 @dataclass
 class Logger:
     logfile: str
     blob_connection_str: Optional[str]
     log_container: Optional[str]
     log_blob: Optional[str]
+    s3_bucket: Optional[str]
 
     def __post_init__(self):
         self.f = open(self.logfile, "a")
@@ -47,6 +49,12 @@ class Logger:
         else:
             self.blob = None
 
+        if self.s3_bucket is not None and 'boto3' in sys.modules:
+            self.s3_log=S3Log(threshold=4, bucket=self.s3_bucket)
+        else:
+            self.s3_log=None
+
+
     def log(self, logtype: str, message: str, **kwargs):
         d = {
             "type": logtype,
@@ -58,6 +66,8 @@ class Logger:
         self.f.flush()
         if self.blob is not None:
             self.blob.append_block(j)
+        if self.s3_log:
+            self.s3_log.log(j)
 
     def log_start(self):
         self.log("start", "Log4Pot started")
@@ -163,46 +173,51 @@ class Log4PotArgumentParser(ArgumentParser):
     def convert_arg_line_to_args(self, arg_line: str) -> List[str]:
         return arg_line.split()
 
+if __name__ == '__main__':
+    argparser = Log4PotArgumentParser(
+        description="A honeypot for the Log4Shell vulnerability (CVE-2021-44228).",
+        fromfile_prefix_chars="@",
+    )
+    argparser.add_argument("--port", "-p", action="append", type=int, help="Listening port")
+    argparser.add_argument("--log", "-l", type=str, default="log4pot.log", help="Log file")
+    argparser.add_argument("--blob-connection-string", "-b", help="Azure blob storage connection string.")
+    argparser.add_argument("--log-container", "-lc", default="logs", help="Azure blob container for logs.")
+    argparser.add_argument("--log-blob", "-lb", default=socket.gethostname() + ".log", help="Azure blob for logs.")
+    argparser.add_argument("--server-header", type=str, default=None, help="Replace the default server header.")
+    argparser.add_argument("--download-payloads", action="store_true", default=False,
+                           help="[EXPERIMENTAL] Download http(s) and ldap payloads and log indicators.")
+    argparser.add_argument("--download-class", action="store_true", default=False,
+                           help="[EXPERIMENTAL] Implement downloading Java Class file referenced by the payload..")
+    argparser.add_argument("--download-dir", type=str, help="Set a download directory. If given, payloads are stored "
+                                                            "persistently and are not deleted after analysis.")
+    argparser.add_argument("--s3_bucket", type=str, help="S3 bucket to upload logs to")
 
-argparser = Log4PotArgumentParser(
-    description="A honeypot for the Log4Shell vulnerability (CVE-2021-44228).",
-    fromfile_prefix_chars="@",
-)
-argparser.add_argument("--port", "-p", action="append", type=int, help="Listening port")
-argparser.add_argument("--log", "-l", type=str, default="log4pot.log", help="Log file")
-argparser.add_argument("--blob-connection-string", "-b", help="Azure blob storage connection string.")
-argparser.add_argument("--log-container", "-lc", default="logs", help="Azure blob container for logs.")
-argparser.add_argument("--log-blob", "-lb", default=socket.gethostname() + ".log", help="Azure blob for logs.")
-argparser.add_argument("--server-header", type=str, default=None, help="Replace the default server header.")
-argparser.add_argument("--download-payloads", action="store_true", default=False,
-                       help="[EXPERIMENTAL] Download http(s) and ldap payloads and log indicators.")
-argparser.add_argument("--download-class", action="store_true", default=False,
-                       help="[EXPERIMENTAL] Implement downloading Java Class file referenced by the payload..")
-argparser.add_argument("--download-dir", type=str, help="Set a download directory. If given, payloads are stored "
-                                                        "persistently and are not deleted after analysis.")
+    args = argparser.parse_args()
+    if args.port is None:
+        print("No port specified!", file=sys.stderr)
+        sys.exit(1)
+    if not azure_import and args.blob_connection_string is not None:
+        print("Azure logging requested but no dependency installed!")
+        sys.exit(2)
 
-args = argparser.parse_args()
-if args.port is None:
-    print("No port specified!", file=sys.stderr)
-    sys.exit(1)
-if not azure_import and args.blob_connection_string is not None:
-    print("Azure logging requested but no dependency installed!")
-    sys.exit(2)
+    if not 'boto3' in sys.modules and args.s3_bucket is not None:
+        print("S3 logging request but no dependency (boto3) installed! exiting!")
+        sys.exit(2)
 
-logger = Logger(args.log, args.blob_connection_string, args.log_container, args.log_blob)
-threads = [
-    Log4PotServerThread(logger, port, server_header=args.server_header, download_payloads=args.download_payloads,
-                        download_dir=args.download_dir, download_class=args.download_class)
-    for port in args.port
-]
-logger.log_start()
+    logger = Logger(args.log, args.blob_connection_string, args.log_container, args.log_blob, args.s3_bucket)
+    threads = [
+        Log4PotServerThread(logger, port, server_header=args.server_header, download_payloads=args.download_payloads,
+                            download_dir=args.download_dir, download_class=args.download_class)
+        for port in args.port
+    ]
+    logger.log_start()
 
-for thread in threads:
-    thread.start()
-    print(f"Started Log4Pot server on port {thread.port}.")
+    for thread in threads:
+        thread.start()
+        print(f"Started Log4Pot server on port {thread.port}.")
 
-for thread in threads:
-    thread.join()
-    print(f"Stopped Log4Pot server on port {thread.port}.")
+    for thread in threads:
+        thread.join()
+        print(f"Stopped Log4Pot server on port {thread.port}.")
 
-logger.close()
+    logger.close()
