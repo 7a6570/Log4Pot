@@ -4,6 +4,7 @@ import json
 import re
 import socket
 import sys
+import traceback
 from argparse import ArgumentParser
 from dataclasses import dataclass
 from datetime import datetime
@@ -50,7 +51,7 @@ class Logger:
             self.blob = None
 
         if self.s3_bucket is not None and 'boto3' in sys.modules:
-            self.s3_log=S3Log(threshold=4, bucket=self.s3_bucket)
+            self.s3_log=S3Log(threshold=1000, bucket=self.s3_bucket)
         else:
             self.s3_log=None
 
@@ -68,6 +69,13 @@ class Logger:
             self.blob.append_block(j)
         if self.s3_log:
             self.s3_log.log(j)
+            if logtype=="payload":
+                self.s3_log.write_logs_to_s3(flush=True)
+
+                if 'javaSerializedData' in kwargs.keys():
+                    self.s3_log.log_payload("javaSerializedData", kwargs['class_filepath'])
+                else:
+                    self.s3_log.log_payload(kwargs['javaFactory'], kwargs['class_filepath'])
 
     def log_start(self):
         self.log("start", "Log4Pot started")
@@ -83,8 +91,8 @@ class Logger:
     def log_payload(self, uuid, **kwargs):
         self.log("payload", "Payload downloaded", correlation_id=str(uuid), **kwargs)
 
-    def log_exception(self, e: Exception):
-        self.log("exception", "Exception occurred", exception=str(e))
+    def log_exception(self, e: Exception, stacktrace: str):
+        self.log("exception", "Exception occurred", exception=str(e), stacktrace=repr(stacktrace))
 
     def log_end(self):
         self.log("end", "Log4Pot stopped")
@@ -127,7 +135,8 @@ class Log4PotHTTPRequestHandler(BaseHTTPRequestHandler):
                     )
                     self.logger.log_payload(self.uuid, **data)
                 except Exception as e:
-                    self.logger.log_exception(e)
+                    exc_type, exc_value, exc_traceback = sys.exc_info()
+                    self.logger.log_exception(e, traceback.format_tb(exc_traceback))
 
     def __getattribute__(self, __name: str) -> Any:
         if __name.startswith("do_"):
@@ -169,7 +178,8 @@ class Log4PotServerThread(Thread):
         except KeyboardInterrupt:
             pass
         except Exception as e:
-            logger.log_exception(e)
+            exc_type, exc_value, exc_traceback = sys.exc_info()
+            logger.self.logger.log_exception(e, traceback.format_tb(exc_traceback))
 
 
 class Log4PotArgumentParser(ArgumentParser):
@@ -194,6 +204,7 @@ if __name__ == '__main__':
     argparser.add_argument("--download-dir", type=str, help="Set a download directory. If given, payloads are stored "
                                                             "persistently and are not deleted after analysis.")
     argparser.add_argument("--s3_bucket", type=str, help="S3 bucket to upload logs to")
+    argparser.add_argument("--download-timeout", type=int, default=10, help="Set download timeout for payloads.")
 
     args = argparser.parse_args()
     if args.port is None:
@@ -210,7 +221,8 @@ if __name__ == '__main__':
     logger = Logger(args.log, args.blob_connection_string, args.log_container, args.log_blob, args.s3_bucket)
     threads = [
         Log4PotServerThread(logger, port, server_header=args.server_header, download_payloads=args.download_payloads,
-                            download_dir=args.download_dir, download_class=args.download_class)
+                            download_dir=args.download_dir, download_class=args.download_class,
+                            download_timeout=args.download_timeout)
         for port in args.port
     ]
     logger.log_start()

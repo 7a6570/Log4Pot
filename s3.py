@@ -11,11 +11,21 @@ except ImportError:
 from io import StringIO
 from datetime import datetime
 import atexit
+import hashlib
 
 class S3Log:
+    """
+        write logs to S3 buckets
+    """
 
     def __init__(self, threshold=100, bucket=None, key_prefix="logs"):
-        
+        """
+            :param threshold: number of log records to keep in memory, before sending them to S3
+            :param bucket: name of S3 bucket to used
+            :param key_prefix: prefix of key name used to store data in the given S3 bucket
+
+        """
+
         self.log_counter=0
         self.log_entry_threshold=threshold
         self.s3=boto3.client('s3')
@@ -27,21 +37,41 @@ class S3Log:
         atexit.register(self.write_logs_to_s3, flush=True)
 
     def log(self, msg):
+        """
+            :param msg: message to log
+            :type msg: str
+        """
+        
         self.buffer.write(msg + "\n")
         self.log_counter+=1
 
         self.write_logs_to_s3()
 
     def log_payload(self, name, payload_path):
+        """
+            log payloads to S3
 
+            :param name: part of the key name used to store payload
+            :param payload_path: path to file containing the payload
+        """
+        with open(payload_path, 'rb') as f:
+            data=f.read()
+
+        m = hashlib.sha256()
+        m.update(data)
+        sha256hash=m.digest().hex()
         now=datetime.now()
-        key=name+"_"+now.strftime("%Y-%m-%d_%H:%M:%S")
-        
-        with open(payload_path) as f:
-            self.s3.put_object(Body=f, Bucket=self.bucket, Key=key)
+        key=sha256hash + "_"+ name+"_"+now.strftime("%Y-%m-%d_%H-%M-%S")
+
+        self.s3.put_object(Body=data, Bucket=self.bucket, Key=key)
 
     def write_logs_to_s3(self, flush=False):
+        """
+            write cached logs to S3
 
+            :param flush: upload logs, even if threshold is not yet reached
+        """
+        
         if (self.log_counter > self.log_entry_threshold or flush) and len(self.buffer.getvalue()) > 0:
 
             now=datetime.now()
@@ -49,14 +79,3 @@ class S3Log:
             self.s3.put_object(Body=self.buffer.getvalue(), Bucket=self.bucket, Key=key)
             self.log_counter=0
             self.buffer=StringIO()
-
-
-# s3=S3Log(threshold=4, bucket="7ebefe7d5292dc872e16d45d1cd19d268841e893")
-
-# for i in range(1,30):
-#     s3.log(f"test {i}")
-
-
-#import ipdb; ipdb.set_trace()
-#res=s3.get_object(Bucket=bucket, Key=key)
-#print(res['Body'].read().decode("utf-8"))
