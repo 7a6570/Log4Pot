@@ -122,7 +122,8 @@ class Log4PotHTTPRequestHandler(BaseHTTPRequestHandler):
                         parse(m.group(0)),
                         str(self.uuid),
                         self.server.download_dir,
-                        self.server.download_class
+                        self.server.download_class,
+                        self.server.download_timeout
                     )
                     self.logger.log_payload(self.uuid, **data)
                 except Exception as e:
@@ -142,6 +143,7 @@ class Log4PotHTTPServer(ThreadingHTTPServer):
         self.download_payloads = kwargs.pop("download_payloads", False),
         self.download_dir = kwargs.pop("download_dir", None)
         self.download_class = kwargs.pop("download_class", None)
+        self.download_timeout = kwargs.pop("download_timeout", None)
         super().__init__(*args, **kwargs)
 
 
@@ -155,7 +157,8 @@ class Log4PotServerThread(Thread):
             server_header=kwargs.pop("server_header", None),
             download_payloads=kwargs.pop("download_payloads", False),
             download_dir=kwargs.pop("download_dir", None),
-            download_class=kwargs.pop("download_class", None)
+            download_class=kwargs.pop("download_class", None),
+            download_timeout=kwargs.pop("download_timeout", None)
         )
         super().__init__(name=f"httpserver-{port}", *args, **kwargs)
 

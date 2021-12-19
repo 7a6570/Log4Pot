@@ -1,5 +1,7 @@
+import base64
 import io
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -21,7 +23,8 @@ def process_payloads(
         parsed_jndi_string: str,
         uuid: str,
         download_dir: Optional[str] = None,
-        download_class: Optional[bool] = False
+        download_class: Optional[bool] = False,
+        download_timeout: Optional[int] = 10
 ):
     if not pycurl_available:
         raise ImportError("Was not able to import pycurl correctly.")
@@ -34,7 +37,7 @@ def process_payloads(
         "ldap"
     ]:
         raise ValueError(f"Cannot process {url.scheme} URLs.")
-    filepath = load_file(str(url))
+    filepath = load_file(str(url), download_timeout)
     data = process_file(filepath)
     if download_dir:
         download_dir = Path(download_dir)
@@ -44,12 +47,22 @@ def process_payloads(
     else:
         os.remove(str(filepath))
 
+    new_path = download_dir.joinpath(uuid + ".class.dat")
     if download_dir and download_class and "javaCodeBase" in data and "javaFactory" in data:
+        # Download referenced external javaCodeBase
         url = data["javaCodeBase"] + data["javaFactory"] + ".class"
         temp_path = load_file(url)
-        new_path = download_dir.joinpath(uuid + ".class.dat")
         shutil.move(temp_path, new_path)
         data["class_filepath"] = str(new_path)
+    elif download_dir and download_class and data.get("javaClassName", None) == "java.lang.String" and \
+            data.get("javaSerializedData", None):
+        # Base64 decode class serialized in javaSerializedData
+        jsd = data.get("javaSerializedData", "")
+        if re.match(r"[a-zA-Z0-9+/]={0,3}", jsd):
+            jsd = base64.b64decode(jsd.encode("ascii"))
+            with io.open(new_path, "wb") as handle:
+                handle.write(jsd)
+            data["class_filepath"] = str(new_path)
     return data
 
 
@@ -63,7 +76,7 @@ def extract_url(url: str):
     return url.strip("{}")
 
 
-def load_file(url: str) -> Union[str, None]:
+def load_file(url: str, timeout: Optional[int] = 10) -> Union[str, None]:
     """Downloads data from URL, creates and writes into a temporary file and return temporary file path."""
     fd, tmp = tempfile.mkstemp()
     status_code = 200
@@ -73,7 +86,7 @@ def load_file(url: str) -> Union[str, None]:
         curl.setopt(pycurl.FOLLOWLOCATION, True)
         curl.setopt(pycurl.USERAGENT, "Java/17.0.1")
         curl.setopt(pycurl.WRITEDATA, handle)
-        curl.setopt(pycurl.TIMEOUT, 3)
+        curl.setopt(pycurl.TIMEOUT, timeout)
         curl.perform()
         status_code = curl.getinfo(pycurl.RESPONSE_CODE)
         curl.close()
